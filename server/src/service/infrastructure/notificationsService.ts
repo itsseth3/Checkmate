@@ -193,32 +193,27 @@ export class NotificationsService implements INotificationsService {
 		const notificationIds = monitor.notifications ?? [];
 		const notifications = await this.notificationsRepository.findNotificationsByIds(notificationIds);
 
-		// Filter notifications that have escalations enabled
-		const notificationsWithEscalations = notifications.filter(n => n.escalationsEnabled && n.escalations && n.escalations.length > 0);
+		const monitorEscalationIds = monitor.escalationNotifications ?? [];
+		const monitorEscalationRate = monitor.escalationRate ?? 0;
 
-		if (notificationsWithEscalations.length === 0) {
-			// No escalations to schedule, send immediate notifications
-			await this.sendNotifications(monitor, monitorStatusResponse, decision);
-			return;
-		}
+		// Send the immediate notification for the current incident state
+		await this.sendNotifications(monitor, monitorStatusResponse, decision);
 
-		// Schedule escalations for each notification
-		for (const notification of notificationsWithEscalations) {
-			if (!notification.escalations) continue;
+		// Schedule monitor-level escalations when configured
+		if (monitorEscalationRate > 0 && monitorEscalationIds.length > 0) {
+			const escalationNotifications = await this.notificationsRepository.findNotificationsByIds(monitorEscalationIds);
 
-			for (const escalation of notification.escalations) {
+			for (const notification of escalationNotifications) {
 				try {
 					await this.escalationsRepository.create({
 						incidentId: new Types.ObjectId(incidentId),
 						notificationId: new Types.ObjectId(notification.id),
 						teamId: new Types.ObjectId(monitor.teamId),
-						delayMinutes: escalation.delayMinutes,
-						message: escalation.message,
-						// sentAt will be null initially, set when actually sent
+						delayMinutes: monitorEscalationRate,
 					});
 				} catch (error) {
 					this.logger.error({
-						message: `Failed to schedule escalation for notification ${notification.id}`,
+						message: `Failed to schedule monitor escalation for notification ${notification.id}`,
 						service: SERVICE_NAME,
 						method: "scheduleEscalations",
 						stack: error instanceof Error ? error.stack : undefined,
@@ -227,14 +222,27 @@ export class NotificationsService implements INotificationsService {
 			}
 		}
 
-		// Send immediate notifications for notifications without escalations
-		const notificationsWithoutEscalations = notifications.filter(n => !n.escalationsEnabled || !n.escalations || n.escalations.length === 0);
-		if (notificationsWithoutEscalations.length > 0) {
-			// Temporarily modify monitor notifications to only include non-escalation ones
-			const originalNotifications = monitor.notifications;
-			monitor.notifications = notificationsWithoutEscalations.map(n => n.id);
-			await this.sendNotifications(monitor, monitorStatusResponse, decision);
-			monitor.notifications = originalNotifications;
+		// Preserve backwards compatibility with notification-level escalations
+		const notificationsWithEscalations = notifications.filter(n => n.escalationsEnabled && n.escalations && n.escalations.length > 0);
+		for (const notification of notificationsWithEscalations) {
+			for (const escalation of notification.escalations ?? []) {
+				try {
+					await this.escalationsRepository.create({
+						incidentId: new Types.ObjectId(incidentId),
+						notificationId: new Types.ObjectId(notification.id),
+						teamId: new Types.ObjectId(monitor.teamId),
+						delayMinutes: escalation.delayMinutes,
+						message: escalation.message,
+					});
+				} catch (error) {
+					this.logger.error({
+						message: `Failed to schedule notification escalation for notification ${notification.id}`,
+						service: SERVICE_NAME,
+						method: "scheduleEscalations",
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
 		}
 	};
 
