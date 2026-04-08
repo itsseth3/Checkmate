@@ -321,13 +321,26 @@ export class NotificationsService implements INotificationsService {
 			case "teams":
 				return await this.teamsProvider.sendTestAlert(notification);
 			default:
-				return false;
+				throw new Error(`Unsupported notification type: ${notification.type}`);
 		}
 	};
 
 	testAllNotifications = async (notificationIds: string[]) => {
 		const notifications = await this.notificationsRepository.findNotificationsByIds(notificationIds);
-		const tasks = notifications.map((notification) => this.sendTestNotification(notification));
+		const tasks = notifications.map(async (notification) => {
+			try {
+				await this.sendTestNotification(notification);
+				return true;
+			} catch (error) {
+				this.logger.warn({
+					message: `Test notification failed for ${notification.type} notification ${notification.id}`,
+					service: SERVICE_NAME,
+					method: "testAllNotifications",
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+				return false;
+			}
+		});
 		const outcomes = await Promise.all(tasks);
 		const succeeded = outcomes.filter(Boolean).length;
 		const failed = outcomes.length - succeeded;
